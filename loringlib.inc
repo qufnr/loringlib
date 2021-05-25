@@ -682,6 +682,63 @@ stock int loringlib_CreateParticleEx ( int target, int entity, float effPos[3], 
 	return entity;
 }
 
+stock int loringlib_CreatePointerParticle ( int target, int cpoint, char[] effName, float lifeTime = 0.0 ) {
+	int entity = CreateEntityByName ( "info_particle_system" );
+	int entity2 = CreateEntityByName ( "info_particle_system" );
+	
+	char szTargetname[64];
+	Format ( szTargetname, sizeof szTargetname, "target_%d", target );
+	DispatchKeyValue ( target, "targetname", szTargetname );
+	
+	char szCPointname[64];
+	Format ( szCPointname, sizeof szCPointname, "cpoint_target_%d", cpoint );
+	DispatchKeyValue ( cpoint, "targetname", szCPointname );
+	
+	char szCPointname2[64];
+	Format ( szCPointname2, sizeof szCPointname2, "particlename_%d", cpoint );
+	
+	DispatchKeyValue ( entity2, "targetname", szCPointname2 );
+	DispatchKeyValue ( entity2, "parentname", szCPointname );
+	
+	SetVariantString ( szCPointname );
+	AcceptEntityInput ( entity2, "SetParent" );
+	
+	SetVariantString ( "primary_smg" );
+	AcceptEntityInput ( entity2, "SetParentAttachment" );
+	
+	DispatchKeyValue ( entity, "targetname", "cpoint_particle" );
+	DispatchKeyValue ( entity, "parentname", szTargetname );
+	DispatchKeyValue ( entity, "effect_name", effName );
+	DispatchKeyValue ( entity, "cpoint1", szCPointname2 );
+	
+	DispatchSpawn ( entity );
+	
+	SetVariantString ( szTargetname );
+	AcceptEntityInput ( entity, "SetParent" );
+	
+	SetVariantString ( "primary_smg" );
+	AcceptEntityInput ( entity, "SetParentAttachment" );
+	
+	ActivateEntity ( entity );
+	AcceptEntityInput ( entity, "start" );
+	
+	char output[64];
+	if ( lifeTime > 0.0 ) 
+	//	CreateTimer ( lifeTime, timerRemoveParticleEnt, EntIndexToEntRef ( entity ) );
+		Format ( output, sizeof ( output ), "OnUser1 !self:kill::%.1f:-1", lifeTime );
+	else
+		Format ( output, sizeof ( output ), "OnUser1 !self:kill::3.0:-1" );
+	
+	SetVariantString ( output );
+	AcceptEntityInput ( entity, "AddOutput" );
+	AcceptEntityInput ( entity, "FireUser1" );
+	
+	if ( GetEdictFlags ( entity ) & FL_EDICT_ALWAYS )
+		SetEdictFlags ( entity, ( GetEdictFlags ( entity ) ^ FL_EDICT_ALWAYS ) );
+	
+	return entity;
+}
+
 public Action particleSetTransmit ( int entity, int client ) {
 	if ( GetEdictFlags ( entity ) & FL_EDICT_ALWAYS )
 		SetEdictFlags ( entity, ( GetEdictFlags ( entity ) ^ FL_EDICT_ALWAYS ) );
@@ -1212,7 +1269,7 @@ stock int loringlib_GetPlayers () {
 stock int loringlib_GetAlivePlayers () {
 	int result;
 	for ( int i = 1; i <= MaxClients; i ++ )
-		if ( loringlib_IsValidClient__PlayGame ( i ) && !IsFakeClient ( i ) )
+		if ( loringlib_IsValidClient__PlayGame ( i ) )
 			result ++;
 	return result;
 }
@@ -1764,6 +1821,7 @@ stock bool loringlib_PrintInstructorMessageByEvent (
 	return true;
 }
 
+
 /**
  * 엔티티 주위에 빛을 만듭니다.
  *
@@ -2159,6 +2217,34 @@ stock int loringlib_MakeExplosion (
 	}
 	else
 		return -1;
+}
+
+stock float loringlib_CS_CreateExplosion ( int attacker, int weapon, float damage = 50.0, float radius = 100.0, float pos[3], int explosionTeam = CS_TEAM_NONE, char[] explosionEffect = "explosion_basic" ) {
+	loringlib_CreateParticleEx ( attacker, 0, pos, NULL_VECTOR, explosionEffect, false, 5.0 );
+	
+	float flTotalDamages = 0.0;
+	
+	float flVictimOrigin[3];
+	float flDamageResult;
+	
+	for ( int victim = 1; victim <= MaxClients; victim ++ ) {
+		if ( loringlib_IsValidClient__PlayGame ( victim ) ) {
+			GetClientAbsOrigin ( victim, flVictimOrigin );
+			
+			if ( GetClientTeam ( victim ) == explosionTeam )
+				continue;
+			
+			if ( GetVectorDistance ( pos, flVictimOrigin ) <= radius ) {
+				flDamageResult = Sine ( ( ( radius - GetVectorDistance ( pos, flVictimOrigin ) ) / radius ) * ( 3.14159 / 2 ) ) * damage;
+				SDKHooks_TakeDamage ( victim, attacker, attacker, flDamageResult, DMG_BLAST, weapon, NULL_VECTOR, pos );
+			//	loringlib_MakeDamage ( attacker, victim, RoundFloat ( flDamageResult ), weapon, DMG_BLAST );
+				
+				flTotalDamages += flDamageResult;
+			}
+		}
+	}
+	
+	return flTotalDamages;
 }
 
 /**
@@ -2785,6 +2871,19 @@ stock int loringlib_GetWeaponAmmo ( int client ) {
 }
 
 /**
+ * 무기의 Ammo 값을 구합니다.
+ *
+ * @param client		클라이언트
+ * @param weapon		무기
+ * @return m_iAmmo
+ */
+stock int loringlib_GetWeaponAmmo2 ( int client, int weapon ) {
+	int ammotype = GetEntProp ( weapon, Prop_Send, "m_iPrimaryAmmoType" );
+	if ( ammotype == -1 )	return -1;
+	return GetEntProp ( client, Prop_Send, "m_iAmmo", _, ammotype );
+}
+
+/**
  * Ammo 값을 설정합니다.
  *
  * @param client			클라이언트
@@ -2817,6 +2916,21 @@ stock void loringlib_SetPlayerWeaponAmmoEx ( int client, int index, int primaryA
 	if ( secondaryAmmo != -1 ) {
 		int offs = offsAmmo + ( loringlib_GetSecondaryAmmoType ( index ) * 4 );
 		SetEntData ( client, offs, secondaryAmmo, 4, true );
+	}
+}
+
+stock void loringlib_GetPlayerWeaponAmmoEx ( int client, int index, int& primaryAmmo = -1, int& secondaryAmmo = -1 ) {
+	int offsAmmo = FindDataMapInfo ( client, "m_iAmmo" );
+	
+	int offs;
+	if ( primaryAmmo != -1 ) {
+		offs = offsAmmo + ( loringlib_GetPrimaryAmmoType ( index ) * 4 );
+		primaryAmmo = GetEntData ( client, offs, 4 );
+	}
+	
+	if ( secondaryAmmo != -1 ) {
+		offs = offsAmmo + ( loringlib_GetSecondaryAmmoType ( index ) * 4 );
+		secondaryAmmo = GetEntData ( client, offs, 4 );
 	}
 }
 
@@ -3652,6 +3766,10 @@ stock void loringlib_HideHUD ( int client, int flags ) {
 	SetEntProp ( client, Prop_Send, "m_iHideHUD", flags );
 }
 
+stock int loringlib_GetHideHUD ( int client ) {
+	return GetEntProp ( client, Prop_Send, "m_iHideHUD" );
+}
+
 stock void loringlib_CSGOClientEnemyGlow ( int client, float times ) {
 	SetEntPropFloat ( client, Prop_Send, "m_flDetectedByEnemySensorTime", times );
 }
@@ -4090,6 +4208,22 @@ stock bool loringlib_ShowFadeUserMessageEx ( int client, int duration, int holdT
 	return true;
 } 
 
+stock void loringlib_VoteMessage ( int client, char[] disp, char[] details ) {
+	Handle userMessage = StartMessageOne ( "VotePass", client, USERMSG_RELIABLE | USERMSG_BLOCKHOOKS );
+	if ( GetUserMessageType () == UM_Protobuf ) {
+		Protobuf pb = UserMessageToProtobuf ( userMessage );
+		if ( pb != null ) {
+			pb.SetInt ( "team", GetClientTeam ( client ) );
+			pb.SetInt ( "vote_type", 0 );
+			pb.SetString ( "disp_str", disp );
+			pb.SetString ( "details_str", details );
+			EndMessage ();
+		}
+		else
+			PrintToChat ( client, "Protobuf is null." );
+	}
+}
+
 /**
  * 클라이언트에게 KeyHintText메세지를 보냅니다.
  *
@@ -4140,24 +4274,24 @@ stock loringlib_SayText2ToAll ( int client, const char[] format, any ... ) {
 /**
  * Send SayText2.
  *
- * @param client
  * @param author
+ * @param target
  * @param wantsToChat
  * @param buffer
  * @param any
  * @return no
  */
-stock void loringlib_SayText2 ( int client, int author = 0, bool wantsToChat = false, const char[] buffer, any ... ) {
+stock void loringlib_SayText2 ( int author, int target = 0, bool wantsToChat = false, const char[] buffer, any ... ) {
 	char temp[192];
 	VFormat ( temp, sizeof ( temp ), buffer, 5 );
 	StrCat ( temp, sizeof ( temp ), "\n" );
 	
-	Handle msg = StartMessageOne ( "SayText2", author, USERMSG_RELIABLE | USERMSG_BLOCKHOOKS );
+	Handle msg = StartMessageOne ( "SayText2", target, USERMSG_RELIABLE | USERMSG_BLOCKHOOKS );
 	if ( GetFeatureStatus ( FeatureType_Native, "GetUserMessageType" ) == FeatureStatus_Available &&
 		GetUserMessageType () == UM_Protobuf ) {
 		Protobuf pb = UserMessageToProtobuf ( msg );
 		if ( pb != null ) {
-			pb.SetInt ( "ent_idx", client );
+			pb.SetInt ( "ent_idx", author );
 			pb.SetBool ( "chat", wantsToChat );
 			
 			pb.SetString ( "msg_name", temp );
@@ -4170,7 +4304,7 @@ stock void loringlib_SayText2 ( int client, int author = 0, bool wantsToChat = f
 	
 	else {
 		BfWrite bf = UserMessageToBfWrite ( msg );
-		bf.WriteByte ( client );
+		bf.WriteByte ( author );
 		bf.WriteByte ( wantsToChat );
 		bf.WriteString ( temp );
 	}
@@ -4206,6 +4340,37 @@ stock void loringlib_PrintKeyHintTextToClient ( int client, const char[] buffer,
 	}
 	
 	EndMessage ();
+}
+
+/**
+ * 라운드 종료 페널에 메시지를 띄웁니다.
+ *
+ * @param client
+ * @param message
+ * @param ...
+ */
+stock void loringlib_PrintWinPanelMessage ( int client, const char[] message, any ... ) {
+	Event hEvent = CreateEvent ( "cs_win_panel_round" );
+	
+	char buff[1024];
+	SetGlobalTransTarget ( client );
+	VFormat ( buff, sizeof buff, message, 3 );
+	
+	hEvent.SetString ( "funfact_token", message );
+	hEvent.FireToClient ( client );
+	hEvent.Cancel ();
+}
+
+stock void loringlib_PrintWinPanelMessageAll ( const char[] message, any ... ) {
+	char buff[1024];
+	VFormat ( buff, sizeof buff, message, 2 );
+	
+	for ( int i = 1; i <= MaxClients; i ++ ) {
+		if ( loringlib_IsValidClient ( i ) && !IsFakeClient ( i ) ) {
+			SetGlobalTransTarget ( i );
+			loringlib_PrintWinPanelMessage ( i, buff );
+		}
+	}
 }
 
 #define HUD_PRINTNOTIFY			1	/**< 알림 메세지로 표시 */
@@ -5453,6 +5618,23 @@ stock void loringlib_GetClientLookAtTargetAngles ( int client, int target, float
     angles[1] -= 180;
 }
 
+stock void loringlib_GetEntityLookAtTargetAngles ( int entity, int target, float angles[3] ) {
+    float entityEyes[3], targetEyes[3], resultant[3];
+    loringlib_GetEntityAngle ( entity, entityEyes );
+    loringlib_GetEntityAngle ( target, targetEyes );
+    MakeVectorFromPoints ( targetEyes, entityEyes, resultant );
+    GetVectorAngles ( resultant, angles );
+    if ( angles[0] >= 270 ) {
+        angles[0] -= 270;
+        angles[0] = ( 90-angles[0] );
+    } else {
+        if ( angles[0] <= 90 ) {
+            angles[0] *= -1;
+        }
+    }
+    angles[1] -= 180;
+}
+
 /**
  * 엔티티를 타겟에게 바라보게 합니다.
  *
@@ -5799,6 +5981,42 @@ stock bool loringlib_TF2_TeleportToSpawn ( int client ) {
 	TeleportEntity ( client, flOrigin, flRotate, NULL_VECTOR );
 	
 	return bResult;
+}
+
+/**
+ * 클라이언트의 옵저버 모드를 구합니다.
+ *
+ * @param client
+ * @return 옵저버 모드
+ */
+stock int loringlib_GetClientObserverMode ( int client ) {
+	return GetEntProp ( client, Prop_Send, "m_iObserverMode" );
+}
+
+/**
+ * 클라이언트의 옵저버 타겟을 구합니다.
+ *
+ * @param client
+ * @return 옵저버 타겟
+ */
+stock int loringlib_GetClientObserverTarget ( int client ) {
+	return GetEntPropEnt ( client, Prop_Send, "m_hObserverTarget" );
+}
+
+/**
+ * origin에서 앞쪽으로 units 만큼 이동합니다.
+ *
+ * @param origin
+ * @param angles
+ * @param units
+ * @param output
+ */
+stock void loringlib_AddInFrontOf ( float origin[3], float angles[3], float units, float output[3] ) {
+	float flAngVectors[3];
+	flAngVectors = angles;
+	GetAngleVectors ( flAngVectors, flAngVectors, NULL_VECTOR, NULL_VECTOR );
+	for ( int i; i < 3; i ++ )
+		output[i] = origin[i] + ( flAngVectors[i] * units );
 }
 
 
